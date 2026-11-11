@@ -1,0 +1,18 @@
+# 编译产物
+lumen.exe
+lumend.exe
+lumen-linux*
+# 截图与临时文件
+shot*.png
+crop.png
+screen.png
+full.png
+*.log
+# 演示用的两个节点数据
+demo/
+# 参考用的第三方仓库（自带 .git，不并入本项目）
+origin/
+# 编辑器/构建留下的备份
+*~
+# 本机的助手工作目录（记忆与临时脚本）
+.workbuddy/
