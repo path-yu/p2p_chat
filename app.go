@@ -30,6 +30,15 @@ type message struct {
 	Text string
 	TS   time.Time
 	Mine bool
+	// Pending marks a message written while nobody was connected: it is
+	// kept and sent as soon as a peer shows up.
+	Pending bool
+}
+
+// outMsg is one message waiting for the first peer to appear.
+type outMsg struct {
+	env   *wire.Envelope
+	msgID string
 }
 
 // room is a channel of the mesh. Rooms are tags: a message carries the
@@ -76,7 +85,9 @@ type app struct {
 	// downloadDir is where received files land.
 	downloadDir string
 	// pending are the files staged in the input, sent with the next Enter.
-	pending     []string
+	pending []string
+	// outbox holds what was written with no peer to hear it, in order.
+	outbox      []outMsg
 	nameDirtyAt time.Time
 	list        ui.ListState
 	info        bool
@@ -209,7 +220,10 @@ func (a *app) onEvent(ev p2p.Event) {
 	}
 	switch ev.Kind {
 	case p2p.PeerJoined:
-		w.Update(func() { a.flash(ev.Peer.Name + " 加入了网状网") })
+		w.Update(func() {
+			a.flash(ev.Peer.Name + " 加入了网状网")
+			a.flushOutbox()
+		})
 	case p2p.PeerLeft:
 		w.Update(func() { a.flash(ev.Peer.Name + " 离开了网状网") })
 	case p2p.Message:
@@ -283,12 +297,25 @@ func (a *app) send(text string) {
 	if r == nil {
 		return
 	}
-	env := &wire.Envelope{Type: wire.Chat, Room: r.ID, Body: text}
+	// The id is made here, not by Broadcast, so the outbox and the bubble
+	// can both refer to the same message.
+	env := &wire.Envelope{Type: wire.Chat, Room: r.ID, Body: text, ID: wire.NewID()}
 	if r.Kind == "dm" {
 		env.To = r.Peer
 	}
+	alone := len(a.node.Peers()) == 0
+	if alone {
+		a.outbox = append(a.outbox, outMsg{env: env, msgID: env.ID})
+		if len(a.outbox) > 50 {
+			a.outbox = a.outbox[1:]
+		}
+		a.node.Logf("没有节点在线，%d 条消息先存着，有人连上就补发", len(a.outbox))
+	}
 	a.node.Broadcast(env)
-	m := &message{ID: env.ID, From: a.id.ID(), Name: a.id.Name, Text: text, TS: time.Now(), Mine: true}
+	m := &message{
+		ID: env.ID, From: a.id.ID(), Name: a.id.Name, Text: text,
+		TS: time.Now(), Mine: true, Pending: alone,
+	}
 	r.Messages = append(r.Messages, m)
 	_ = a.st.Append(store.Msg{
 		ID: m.ID, Room: r.ID, From: m.From, Name: m.Name, Text: m.Text,
@@ -665,4 +692,32 @@ func (a *app) submit() {
 		a.flash(err.Error())
 		return
 	}
+}
+
+// flushOutbox sends what was written while nobody was listening. The ids
+// do not change, so a peer that already had them drops the second copy.
+func (a *app) flushOutbox() {
+	if len(a.outbox) == 0 || len(a.node.Peers()) == 0 {
+		return
+	}
+	queued := a.outbox
+	a.outbox = nil
+	for _, q := range queued {
+		a.node.Broadcast(q.env)
+		for _, r := range a.rooms {
+			for _, m := range r.Messages {
+				if m.ID == q.msgID {
+					m.Pending = false
+				}
+			}
+		}
+	}
+	if n := len(queued); n > 0 {
+		a.flash(fmt.Sprintf("补发了 %d 条离线消息", n))
+	}
+}
+
+// pendingCount is how many messages are still waiting for a peer.
+func (a *app) pendingCount() int {
+	return len(a.outbox)
 }

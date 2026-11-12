@@ -24,7 +24,11 @@ func newTestApp(t *testing.T) (*app, string) {
 	if err := id.Save(dir); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	return newApp(id, st, p2p.New(id, 0), dir), dir
+	a := newApp(id, st, p2p.New(id, 0), dir)
+	// Windows will not delete the temp folder while the history file is
+	// open, so the store lets go before the test ends.
+	t.Cleanup(func() { _ = st.Close() })
+	return a, dir
 }
 
 // TestProfilePersists: what the dialog keeps has to reach the identity
@@ -150,5 +154,51 @@ func TestPendingAttachments(t *testing.T) {
 	a.submit()
 	if len(a.pending) != 1 {
 		t.Fatalf("a failed send threw the attachment away: %d left", len(a.pending))
+	}
+}
+
+// TestOutboxKeepsWhatNobodyHeard: a message written with no peer is held,
+// marked, and sent when someone arrives.
+func TestOutboxKeepsWhatNobodyHeard(t *testing.T) {
+	a, _ := newTestApp(t)
+	r := a.current()
+	if r == nil {
+		t.Fatal("no room")
+	}
+	if len(a.node.Peers()) != 0 {
+		t.Fatal("the test node already has peers")
+	}
+
+	a.send("没人听得到")
+	if len(a.outbox) != 1 {
+		t.Fatalf("outbox holds %d, want 1", len(a.outbox))
+	}
+	last := r.Messages[len(r.Messages)-1]
+	if !last.Pending {
+		t.Fatal("the message is not marked as waiting")
+	}
+	if id := a.outbox[0].msgID; id != last.ID {
+		t.Fatalf("outbox id %q, message id %q", id, last.ID)
+	}
+
+	// Nobody connected yet: flushing must keep it.
+	a.flushOutbox()
+	if len(a.outbox) != 1 {
+		t.Fatalf("flush dropped it with no peer: %d left", len(a.outbox))
+	}
+	if !last.Pending {
+		t.Fatal("the message stopped waiting without a peer")
+	}
+}
+
+// TestOutboxIsBounded: a long offline session must not grow without end.
+func TestOutboxIsBounded(t *testing.T) {
+	a, _ := newTestApp(t)
+	for i := 0; i < 60; i++ {
+		a.draft = "m" + string(rune('a'+i%26))
+		a.send(a.draft)
+	}
+	if len(a.outbox) > 50 {
+		t.Fatalf("outbox grew to %d", len(a.outbox))
 	}
 }

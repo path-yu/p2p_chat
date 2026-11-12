@@ -765,6 +765,9 @@ func (a *app) header(c *ui.Context, t *ui.Theme, r *room) {
 	if len(typing) > 0 {
 		subtitle = strings.Join(typing, "、") + " 正在输入…"
 	}
+	if n := a.pendingCount(); n > 0 && len(typing) == 0 {
+		subtitle = fmt.Sprintf("%d 条待发送 · 有人连上就补发", n)
+	}
 	ui.Row(c).Height(46).FillWidth().Padding(0, 14, 0, 20).Gap(10).
 		BorderWidth(0, 0, 1, 0).BorderColor(a.pal.hairline).Children(func() {
 		ui.Column(c).Grow(1).Children(func() {
@@ -818,7 +821,11 @@ func (a *app) messageRow(c *ui.Context, t *ui.Theme, r *room, i int) {
 					Padding(8, 12.5).Radius(17).MaxWidth(520).
 					Gradient(a.pal.mineA, a.pal.mineB, 160)
 				if last {
-					ui.Text(c, clock(m.TS)).FontSize(9).TextColor(t.TextMuted).Margin(3, 3, 0, 0)
+					stamp := clock(m.TS)
+					if m.Pending {
+						stamp = "待发送 · " + stamp
+					}
+					ui.Text(c, stamp).FontSize(9).TextColor(t.TextMuted).Margin(3, 3, 0, 0)
 				}
 			})
 		})

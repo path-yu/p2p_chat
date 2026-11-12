@@ -120,3 +120,16 @@ func (s *Store) History(n int) []Msg {
 	}
 	return all
 }
+
+// Close lets go of the history file, which Windows will not delete while
+// a handle is open.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return nil
+	}
+	err := s.file.Close()
+	s.file = nil
+	return err
+}
