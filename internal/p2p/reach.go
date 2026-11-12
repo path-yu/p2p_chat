@@ -123,6 +123,7 @@ func (n *Node) Reach(cfg ReachConfig) {
 		n.reach.Unlock()
 	}
 
+	started := time.Now()
 	go func() {
 		// The table fills while the ports are mapped and STUN is asked, so
 		// the rendezvous starts without waiting on either.
@@ -142,27 +143,10 @@ func (n *Node) Reach(cfg ReachConfig) {
 			})
 		}
 
-		// 1. Ask the router to forward the ports, when it speaks UPnP.
-		if m, err := nat.Map(n.Port, "TCP", 0); err != nil {
-			logf("端口映射（TCP）未成功: %v", err)
-			n.reach.Lock()
-			n.reach.r.Note = err.Error()
-			n.reach.Unlock()
-		} else {
-			addMapping(m)
-			logf("路由器已放行 TCP %s", m.External.String())
-		}
-		if n.hub != nil {
-			if m, err := nat.Map(n.hub.port(), "UDP", 0); err == nil {
-				addMapping(m)
-				logf("路由器已放行 UDP %s", m.External.String())
-			}
-		}
-
-		// 2. Learn the address the internet sees on the punch socket: that
-		// is what a peer on another network sends to.
+		// 1. STUN first: the address is what the window shows and what a
+		// peer needs to reach this node, so it must not wait on a router
+		// that may not even answer.
 		var public nat.Endpoint
-		natType := ""
 		if n.hub != nil {
 			send := func(b []byte, to *net.UDPAddr) error { return n.hub.send(to, b) }
 			recv := n.hub.recv
@@ -171,7 +155,7 @@ func (n *Node) Reach(cfg ReachConfig) {
 			var ep nat.Endpoint
 			var firstErr error
 			for i := 0; i < len(servers) && i < 3; i++ {
-				got, err := nat.DiscoverVia(send, recv, servers[i], 3*time.Second)
+				got, err := nat.DiscoverVia(send, recv, servers[i], 2*time.Second)
 				if err == nil {
 					ep = got
 					break
@@ -187,29 +171,54 @@ func (n *Node) Reach(cfg ReachConfig) {
 				n.reach.Unlock()
 			} else {
 				public = ep
-				if ep2, err := nat.DiscoverVia(send, recv, pick(1), 3*time.Second); err == nil {
-					switch {
-					case ep2.IP.Equal(ep.IP) && ep2.Port == ep.Port:
-						natType = "cone"
-					case ep2.Port != ep.Port:
-						natType = "symmetric"
-					default:
-						natType = "unknown"
-					}
-				}
+				n.reach.Lock()
+				n.reach.r.Public = ep.String()
+				n.reach.r.PublicIP = ep.IP.String()
+				n.reach.Unlock()
+				logf("公网地址 %s（%d ms）", ep.String(), time.Since(started).Milliseconds())
 			}
 		}
 
-		n.reach.Lock()
+		// 2. The NAT type takes a second question to another server; it is
+		// worth a line of the log, not a second of the window.
 		if !public.Empty() {
-			n.reach.r.Public = public.String()
-			n.reach.r.PublicIP = public.IP.String()
+			if ep2, err := nat.DiscoverVia(
+				func(b []byte, to *net.UDPAddr) error { return n.hub.send(to, b) },
+				n.hub.recv, pick(1), 3*time.Second); err == nil {
+				kind := "unknown"
+				switch {
+				case ep2.IP.Equal(public.IP) && ep2.Port == public.Port:
+					kind = "cone"
+				case ep2.Port != public.Port:
+					kind = "symmetric"
+				}
+				n.reach.Lock()
+				n.reach.r.NAT = kind
+				n.reach.Unlock()
+				logf("NAT 类型 %s", kind)
+			}
 		}
-		n.reach.r.NAT = natType
-		n.reach.Unlock()
-		if !public.Empty() {
-			logf("公网地址 %s（%s NAT）", public.String(), natType)
-		}
+
+		// 3. Ask the router to forward the ports, when it speaks UPnP. This
+		// can take seconds on a network without UPnP, so it runs beside the
+		// rest rather than in front of it.
+		go func() {
+			if m, err := nat.Map(n.Port, "TCP", 0); err != nil {
+				logf("端口映射（TCP）未成功: %v", err)
+				n.reach.Lock()
+				n.reach.r.Note = err.Error()
+				n.reach.Unlock()
+			} else {
+				addMapping(m)
+				logf("路由器已放行 TCP %s", m.External.String())
+			}
+			if n.hub != nil {
+				if m, err := nat.Map(n.hub.port(), "UDP", 0); err == nil {
+					addMapping(m)
+					logf("路由器已放行 UDP %s", m.External.String())
+				}
+			}
+		}()
 
 		// 3. Announce the port peers punch, and punch towards the peers
 		// found in the swarm.
