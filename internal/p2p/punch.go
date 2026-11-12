@@ -136,10 +136,10 @@ func (n *Node) Punch(addr string) {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		if pipe.seen.Load() && len(near) > 0 {
-			n.logf("打洞打通用上了邻近端口（%s 无回应）", addr)
-		}
 		if !pipe.seen.Load() {
+			// A peer that answers on a neighbour port reaches this node as
+			// an unknown address and is connected by its own punch, so the
+			// "已连接" line is the honest place to see it, not here.
 			n.logf("打洞超时: %s", addr)
 			pipe.Close()
 			n.lookupAgain()
