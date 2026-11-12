@@ -231,9 +231,30 @@ func (a *app) sidebar(c *ui.Context, t *ui.Theme) {
 		}
 
 		ui.Spacer(c)
+		a.connectRow(c, t)
 		a.securityLine(c, t)
 		a.meRow(c, t)
 	})
+}
+
+// connectRow is the way in that never moves: the welcome card's goes away
+// with the first message, and the inspector can be closed.
+func (a *app) connectRow(c *ui.Context, t *ui.Theme) {
+	row := ui.Row(c).Gap(6).Padding(4, 9).Radius(8).Cursor(ui.CursorPointer).
+		Margin(0, 0, 6, 0)
+	if row.Hovered() {
+		row.Background(a.pal.hover)
+	}
+	row.Children(func() {
+		ui.Icon(c, icoPlus).FontSize(10.5).TextColor(t.TextMuted)
+		ui.Text(c, "手动连接").FontSize(11).TextColor(t.Text.Mix(t.TextMuted, 0.35)).Grow(1)
+		if !a.info {
+			ui.Text(c, "在右侧输入").FontSize(9).TextColor(t.TextMuted)
+		}
+	})
+	if row.Clicked() {
+		a.info = true
+	}
 }
 
 func (a *app) logo(c *ui.Context, size float32) {
@@ -659,6 +680,35 @@ func humanSize(n int64) string {
 		i++
 	}
 	return fmt.Sprintf("%.1f %s", v, units[i])
+}
+
+// connectCard keeps the manual way in reach whatever the conversation
+// holds: the one in the welcome card goes away as soon as a message
+// arrives, and with it every way to reach a peer on another network.
+func (a *app) connectCard(c *ui.Context, t *ui.Theme) {
+	a.card(c, t, func() {
+		a.cardTitle(c, t, "手动连接")
+		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+			in := ui.TextInput(c, &a.connDraft).
+				Placeholder("对方的 ip:端口").
+				Background(t.Background).Border(1, a.pal.hairline).
+				Padding(5, 8).Radius(8).FontSize(11).Grow(1)
+			in.OnTextKey(func(k ui.TextKey) bool {
+				if k.Key == ui.KeyEnter && k.Mods == 0 {
+					k.SetText("")
+					a.connectTo(a.connDraft)
+					return true
+				}
+				return false
+			})
+			if in.Submitted() {
+				a.connectTo(a.connDraft)
+			}
+			a.smallButton(c, t, "连接", true, func() { a.connectTo(a.connDraft) })
+		})
+		ui.Text(c, a.connectHint()).FontSize(9).LineHeight(1.5).
+			TextColor(t.TextMuted)
+	})
 }
 
 // filesCard says where received files land, and lets it be changed.
@@ -1151,6 +1201,7 @@ func (a *app) inspector(c *ui.Context, t *ui.Theme) {
 				a.identityCard(c, t)
 				a.reachCard(c, t)
 				a.networkCard(c, t)
+				a.connectCard(c, t)
 				a.filesCard(c, t)
 				a.securityCard(c, t)
 				a.peersCard(c, t)
