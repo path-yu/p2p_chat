@@ -471,7 +471,10 @@ func (a *app) applyFile(ev p2p.Event) {
 			}
 		}
 	}
-	r := a.current()
+	r := a.room(st.Room)
+	if r == nil {
+		r = a.current()
+	}
 	if r == nil {
 		return
 	}
@@ -510,7 +513,11 @@ func (a *app) sendFolder() {
 }
 
 func (a *app) offer(paths []string) {
-	st, err := a.node.OfferFile(paths...)
+	room := ""
+	if r := a.current(); r != nil {
+		room = r.ID
+	}
+	st, err := a.node.OfferFile(room, paths...)
 	if err != nil {
 		a.flash(err.Error())
 		return
@@ -648,7 +655,11 @@ func (a *app) submit() {
 	}
 	paths := a.pending
 	a.pending = nil
-	if _, err := a.node.OfferFile(paths...); err != nil {
+	room := ""
+	if cur := a.current(); cur != nil {
+		room = cur.ID
+	}
+	if _, err := a.node.OfferFile(room, paths...); err != nil {
 		// Nothing was sent: keep them staged so the user can retry.
 		a.pending = paths
 		a.flash(err.Error())

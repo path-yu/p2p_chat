@@ -21,6 +21,10 @@ func (n *Node) StartUDP(port int) error {
 		// routers have a way through, and let the handshake follow.
 		n.Punch(addr.String())
 	}
+	n.mu.Lock()
+	every := n.warmEvery
+	n.mu.Unlock()
+	go n.keepPeersWarm(every)
 	return nil
 }
 
@@ -100,6 +104,13 @@ func (n *Node) Punch(addr string) {
 			n.mu.Unlock()
 		}()
 		pipe := hub.open(ua)
+		// A burst first: the two sides have to be sending while the other
+		// one's mapping exists, and a tight opening window makes that far
+		// likelier than one packet every 200 ms.
+		for i := 0; i < 12 && !pipe.seen.Load(); i++ {
+			hub.punch(ua)
+			time.Sleep(30 * time.Millisecond)
+		}
 		deadline := time.Now().Add(12 * time.Second)
 		for time.Now().Before(deadline) && !pipe.seen.Load() {
 			hub.punch(ua)
@@ -108,6 +119,7 @@ func (n *Node) Punch(addr string) {
 		if !pipe.seen.Load() {
 			n.logf("打洞超时: %s", addr)
 			pipe.Close()
+			n.lookupAgain()
 			return
 		}
 		peer, _, err := handshake(pipe, n.ID, n.Port, n.Addr)
@@ -123,6 +135,86 @@ func (n *Node) Punch(addr string) {
 		peer.Outbound = true
 		n.addPeer(peer)
 	}()
+}
+
+// PunchAll tries several addresses at once: a lookup often knows more than
+// one, and the first that answers is the one worth keeping. Attempts are
+// capped so a stale table cannot become a flood.
+func (n *Node) PunchAll(addrs []string, limit int) {
+	if limit <= 0 {
+		limit = 3
+	}
+	tried := 0
+	for _, addr := range addrs {
+		if tried >= limit {
+			return
+		}
+		n.mu.Lock()
+		busy := false
+		for _, p := range n.peers {
+			if p.Addr == addr {
+				busy = true
+				break
+			}
+		}
+		if n.punching[addr] {
+			busy = true
+		}
+		n.mu.Unlock()
+		if busy {
+			continue
+		}
+		n.Punch(addr)
+		tried++
+	}
+}
+
+// keepPeersWarm sends a few bytes to every punched peer now and then. A
+// NAT drops a mapping that stays quiet, and that mapping is per peer: the
+// pings to the STUN server do not keep the peer's door open. Without this
+// an idle conversation loses its path every half minute and has to punch
+// again, which is what made calls drop.
+func (n *Node) keepPeersWarm(every time.Duration) {
+	if n.hub == nil {
+		return
+	}
+	if every <= 0 {
+		every = 15 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for range t.C {
+		n.mu.Lock()
+		addrs := make([]string, 0, len(n.peers))
+		for _, p := range n.peers {
+			if p.UDP && p.Addr != "" {
+				addrs = append(addrs, p.Addr)
+			}
+		}
+		n.mu.Unlock()
+		for _, addr := range addrs {
+			if ua, err := net.ResolveUDPAddr("udp4", addr); err == nil {
+				n.hub.punch(ua)
+				n.warm.Add(1)
+			}
+		}
+	}
+}
+
+// lookupAgain asks for the peer's current endpoints, at most once every
+// ten seconds: a punch that failed usually means the address moved, and
+// the rendezvous knows the new one before the next scheduled round.
+func (n *Node) lookupAgain() {
+	n.mu.Lock()
+	ask := n.reLookup
+	recent := time.Since(n.lastLookup) < 10*time.Second
+	if !recent {
+		n.lastLookup = time.Now()
+	}
+	n.mu.Unlock()
+	if ask != nil && !recent {
+		go ask()
+	}
 }
 
 // udpStatus tells whether the punch socket runs.

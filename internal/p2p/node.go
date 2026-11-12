@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ptp_chat/internal/identity"
@@ -90,6 +91,18 @@ type Node struct {
 	punching map[string]bool
 	// retries bounds the resends of one packet before a path is dropped.
 	retries int
+
+	// reLookup asks the rendezvous for fresh endpoints, so that a punch
+	// that timed out can try the peer's new address at once instead of
+	// waiting for the next scheduled lookup.
+	reLookup   func()
+	lastLookup time.Time
+
+	// warmEvery is how often a punched peer gets a keepalive packet; a NAT
+	// forgets a mapping that stays quiet, and that mapping is per peer.
+	warmEvery time.Duration
+	// warm counts the keepalives sent, which a test can watch.
+	warm atomic.Int64
 
 	// files are the transfers in flight, offered or under way.
 	fmu   sync.Mutex
@@ -322,7 +335,7 @@ func (n *Node) dropPeer(p *Peer, why string) {
 
 // repunch tries a lost peer's last address again, backing off.
 func (n *Node) repunch(id, addr string) {
-	for _, wait := range []time.Duration{2 * time.Second, 8 * time.Second, 20 * time.Second, 40 * time.Second} {
+	for _, wait := range []time.Duration{1 * time.Second, 3 * time.Second, 8 * time.Second, 20 * time.Second, 45 * time.Second} {
 		time.Sleep(wait)
 		n.mu.Lock()
 		_, alive := n.peers[id]

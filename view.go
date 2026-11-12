@@ -600,19 +600,21 @@ func (a *app) fileCard(c *ui.Context, t *ui.Theme, f *p2p.FileState) {
 	})
 }
 
-// smallButton is a compact action on a card.
+// smallButton is a compact action on a card. It is a real button rather
+// than a styled row, so the framework gives it the hit area, the hover and
+// the keyboard activation a button is expected to have.
 func (a *app) smallButton(c *ui.Context, t *ui.Theme, label string, primary bool, fn func()) {
-	btn := ui.Row(c).Padding(3, 10).Radius(7).Cursor(ui.CursorPointer)
+	// A real button gives the framework the hit area and the keyboard
+	// activation; the label is drawn here so it keeps the theme's type.
+	btn := ui.ButtonBase(c).Padding(3, 10).Radius(7).Height(22)
+	col := t.Text
 	if primary {
 		btn.Background(t.Accent)
+		col = ui.RGBA(255, 255, 255, 0.98)
 	} else {
 		btn.Background(a.pal.hover)
 	}
 	btn.Children(func() {
-		col := t.Text
-		if primary {
-			col = ui.RGBA(255, 255, 255, 0.98)
-		}
 		ui.Text(c, label).FontSize(10).TextColor(col)
 	})
 	if btn.Clicked() {

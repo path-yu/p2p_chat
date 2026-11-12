@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -46,6 +47,9 @@ const (
 type FileEntry struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
+	// Tag names this file's content, so that a part file left by a
+	// different file of the same name is not mistaken for a resume.
+	Tag string `json:"tag,omitempty"`
 }
 
 // FileState is what a window shows about one transfer.
@@ -61,8 +65,11 @@ type FileState struct {
 	Finished bool   `json:"finished"`
 	Path     string `json:"path,omitempty"`
 	Peer     string `json:"peer,omitempty"`
-	Err      string `json:"err,omitempty"`
-	Rate     int64  `json:"rate,omitempty"`
+	// Room is the conversation the transfer belongs to, so the card shows
+	// up where it was started rather than wherever the reader happens to be.
+	Room string `json:"room,omitempty"`
+	Err  string `json:"err,omitempty"`
+	Rate int64  `json:"rate,omitempty"`
 }
 
 // Percent is how far the transfer got, 0 to 100.
@@ -91,6 +98,8 @@ type fileMsg struct {
 	Have []string `json:"have,omitempty"`
 	// Sha is one hash per file, sent when the sender is done.
 	Sha []string `json:"sha,omitempty"`
+	// Room names the conversation this transfer belongs to.
+	Room string `json:"room,omitempty"`
 }
 
 type outFile struct {
@@ -146,12 +155,11 @@ func (ft *fileTransfer) set(fn func(*FileState)) FileState {
 // ---------------------------------------------------------------- bitmaps
 
 func chunkCount(size int64) int {
+	// A file of no bytes has no chunks: forcing one would make the sender
+	// announce a chunk it never sends, and the transfer would never finish.
 	n := int(size / fileChunk)
 	if size%fileChunk != 0 {
 		n++
-	}
-	if n < 1 {
-		n = 1
 	}
 	return n
 }
@@ -188,15 +196,16 @@ func sidecarPath(part string) string { return part + ".lumen" }
 
 const sidecarMagic = "LMP1"
 
-func saveBitmap(part string, chunks int, bits []byte) error {
-	buf := make([]byte, 8+len(bits))
-	copy(buf, sidecarMagic)
-	binary.BigEndian.PutUint32(buf[4:], uint32(chunks))
-	copy(buf[8:], bits)
+func saveBitmap(part string, chunks int, tag string, bits []byte) error {
+	hdr := make([]byte, 8+len(tag))
+	copy(hdr, sidecarMagic)
+	binary.BigEndian.PutUint32(hdr[4:], uint32(chunks))
+	copy(hdr[8:], tag)
+	buf := append(hdr, bits...)
 	return os.WriteFile(sidecarPath(part), buf, 0o644)
 }
 
-func loadBitmap(part string, chunks int) []byte {
+func loadBitmap(part string, chunks int, tag string) []byte {
 	data, err := os.ReadFile(sidecarPath(part))
 	if err != nil || len(data) < 8 || string(data[:4]) != sidecarMagic {
 		return nil
@@ -204,7 +213,12 @@ func loadBitmap(part string, chunks int) []byte {
 	if int(binary.BigEndian.Uint32(data[4:])) != chunks {
 		return nil
 	}
-	bits := data[8:]
+	if len(tag) > 0 {
+		if len(data) < 8+len(tag) || string(data[8:8+len(tag)]) != tag {
+			return nil
+		}
+	}
+	bits := data[8+len(tag):]
 	if len(bits) != (chunks+7)/8 {
 		return nil
 	}
@@ -224,7 +238,7 @@ func randomID() string {
 // OfferFile asks the newest peer to take one or more paths: a file, a
 // folder, or what a multi-selection gave. A folder is walked, so its shape
 // arrives with it.
-func (n *Node) OfferFile(paths ...string) (FileState, error) {
+func (n *Node) OfferFile(room string, paths ...string) (FileState, error) {
 	if len(paths) == 0 {
 		return FileState{}, errors.New("没有选择要发的东西")
 	}
@@ -256,14 +270,14 @@ func (n *Node) OfferFile(paths ...string) (FileState, error) {
 		out:  out,
 		state: FileState{
 			ID: id, Name: name, Size: total, Files: len(entries),
-			Active: true, Peer: p.Name, Path: paths[0],
+			Active: true, Peer: p.Name, Path: paths[0], Room: room,
 		},
 	}
 	n.addFile(ft)
 	first := ft.snapshot()
 	n.emit(Event{Kind: FileOffer, Peer: p.info(), File: &first})
 
-	n.sendFileMsg(p, fileMsg{Action: "offer", ID: id, Name: name, Files: entries})
+	n.sendFileMsg(p, fileMsg{Action: "offer", ID: id, Name: name, Files: entries, Room: room})
 	return ft.snapshot(), nil
 }
 
@@ -295,7 +309,7 @@ func collect(paths []string) (base, name string, entries []FileEntry, out []*out
 					return nil
 				}
 				entries = append(entries, FileEntry{
-					Path: filepath.ToSlash(rel), Size: fi.Size(),
+					Path: filepath.ToSlash(rel), Size: fi.Size(), Tag: randomID(),
 				})
 				out = append(out, &outFile{
 					abs: path, entry: entries[len(entries)-1],
@@ -309,7 +323,7 @@ func collect(paths []string) (base, name string, entries []FileEntry, out []*out
 			return base, name, entries, out, nil
 		}
 		base, name = filepath.Dir(abs[0]), filepath.Base(abs[0])
-		entries = append(entries, FileEntry{Path: name, Size: info.Size()})
+		entries = append(entries, FileEntry{Path: name, Size: info.Size(), Tag: randomID()})
 		out = append(out, &outFile{abs: abs[0], entry: entries[0], chunks: chunkCount(info.Size())})
 		return base, name, entries, out, nil
 	}
@@ -327,7 +341,7 @@ func collect(paths []string) (base, name string, entries []FileEntry, out []*out
 			rel = "_" + rel
 		}
 		seen[rel] = true
-		entries = append(entries, FileEntry{Path: rel, Size: info.Size()})
+		entries = append(entries, FileEntry{Path: rel, Size: info.Size(), Tag: randomID()})
 		out = append(out, &outFile{abs: a, entry: entries[len(entries)-1], chunks: chunkCount(info.Size())})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].entry.Path < out[j].entry.Path })
@@ -368,7 +382,7 @@ func (n *Node) AcceptFile(id, dir string) error {
 	var resumed int64
 	for _, f := range ft.in {
 		part := f.abs + ".part"
-		if bits := loadBitmap(part, f.chunks); bits != nil {
+		if bits := loadBitmap(part, f.chunks, f.entry.Tag); bits != nil {
 			f.have = bits
 		} else {
 			f.have = newBitmap(f.chunks)
@@ -489,7 +503,7 @@ func (n *Node) onFileMsg(p *Peer, env *wire.Envelope) {
 			dir:  DefaultDownloadDir(),
 			state: FileState{
 				ID: m.ID, Name: m.Name, Files: len(m.Files),
-				Incoming: true, Peer: env.Name,
+				Incoming: true, Peer: env.Name, Room: m.Room,
 			},
 		}
 		var total int64
@@ -556,16 +570,11 @@ func (n *Node) prepare(ft *fileTransfer) error {
 		target := root
 		if st.Files > 1 || strings.Contains(f.entry.Path, "/") {
 			target = filepath.Join(root, safePath(f.entry.Path))
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := os.MkdirAll(longPath(filepath.Dir(target)), 0o755); err != nil {
 				return err
 			}
 		}
 		f.abs = target
-		fh, err := os.OpenFile(target+".part", os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			return err
-		}
-		f.f = fh
 	}
 	ft.state.Path = root
 	return nil
@@ -592,9 +601,20 @@ func (n *Node) onFileFrame(p *Peer, plain []byte) {
 		return
 	}
 	f := ft.in[idx]
-	if f.f == nil || bitGet(f.have, seq) {
+	if bitGet(f.have, seq) {
 		ft.mu.Unlock()
 		return
+	}
+	if f.f == nil {
+		// The file is made when its first chunk arrives, so a transfer
+		// that never starts leaves nothing behind.
+		fh, err := os.OpenFile(longPath(f.abs+".part"), os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			ft.mu.Unlock()
+			n.failFile(ft, fmt.Errorf("建文件失败: %w", err))
+			return
+		}
+		f.f = fh
 	}
 	if _, err := f.f.WriteAt(data, int64(seq)*fileChunk); err != nil {
 		ft.mu.Unlock()
@@ -607,7 +627,7 @@ func (n *Node) onFileFrame(p *Peer, plain []byte) {
 	ft.state.Done += int64(len(data))
 	if f.got-f.marked >= bitmapFlush || f.got == f.chunks {
 		f.marked = f.got
-		_ = saveBitmap(f.abs+".part", f.chunks, f.have)
+		_ = saveBitmap(f.abs+".part", f.chunks, f.entry.Tag, f.have)
 	}
 	ft.mu.Unlock()
 	n.emitProgress(ft, false)
@@ -712,12 +732,24 @@ func (n *Node) finishIncoming(id string, shas []string) {
 		ft.mu.Unlock()
 
 		part := f.abs + ".part"
+		if f.chunks == 0 {
+			// A file of no bytes sends no chunk; make it here.
+			if err := os.MkdirAll(longPath(filepath.Dir(f.abs)), 0o755); err != nil {
+				n.failFile(ft, err)
+				return
+			}
+			if err := os.WriteFile(longPath(f.abs), nil, 0o644); err != nil {
+				n.failFile(ft, err)
+				return
+			}
+			continue
+		}
 		if f.got != f.chunks {
 			n.failFile(ft, fmt.Errorf("%s 还差 %d 块", f.entry.Path, f.chunks-f.got))
 			return
 		}
 		if i < len(shas) && shas[i] != "" {
-			sum, err := hashFile(part)
+			sum, err := hashFile(longPath(part))
 			if err != nil {
 				n.failFile(ft, err)
 				return
@@ -730,7 +762,7 @@ func (n *Node) finishIncoming(id string, shas []string) {
 		if err := os.Remove(sidecarPath(part)); err != nil && !os.IsNotExist(err) {
 			n.logf("清理位图失败: %v", err)
 		}
-		if err := os.Rename(part, f.abs); err != nil {
+		if err := os.Rename(longPath(part), longPath(f.abs)); err != nil {
 			n.failFile(ft, err)
 			return
 		}
@@ -754,6 +786,13 @@ func (n *Node) failFile(ft *fileTransfer, err error) {
 			_ = f.f.Sync()
 			f.f.Close()
 			f.f = nil
+		}
+		if f.got == 0 && f.abs != "" {
+			// Nothing arrived: do not leave an empty shell behind.
+			if fi, statErr := os.Stat(longPath(f.abs + ".part")); statErr == nil && fi.Size() == 0 {
+				_ = os.Remove(longPath(f.abs + ".part"))
+				_ = os.Remove(sidecarPath(longPath(f.abs + ".part")))
+			}
 		}
 	}
 	ft.state.Active = false
@@ -845,7 +884,9 @@ func safeName(name string) string {
 	return name
 }
 
-// safePath does the same for the inside of a folder, keeping the shape.
+// safePath does the same for the inside of a folder, keeping the shape,
+// and makes every part a name Windows will actually accept: a file called
+// a:b.txt on another system would otherwise fail to be written here.
 func safePath(p string) string {
 	parts := strings.Split(filepath.ToSlash(p), "/")
 	out := make([]string, 0, len(parts))
@@ -854,10 +895,45 @@ func safePath(p string) string {
 		case "", ".", "..":
 			continue
 		}
-		out = append(out, part)
+		out = append(out, safeNamePart(part))
 	}
 	if len(out) == 0 {
 		return "文件"
 	}
 	return filepath.Join(out...)
+}
+
+// safeNamePart replaces what Windows forbids in a name, and drops the
+// trailing dots and spaces it also refuses.
+func safeNamePart(part string) string {
+	repl := strings.NewReplacer(
+		"<", "_", ">", "_", ":", "_", `"`, "_",
+		"|", "_", "?", "_", "*", "_", string(os.PathSeparator), "_",
+		"/", "_",
+	)
+	part = repl.Replace(part)
+	part = strings.TrimRight(part, " .")
+	if part == "" {
+		return "文件"
+	}
+	return part
+}
+
+// longPath lets Windows reach past MAX_PATH, which a deep folder inside a
+// deep download folder easily does.
+func longPath(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	if strings.HasPrefix(p, `\\?\`) {
+		return p
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	if len(abs) < 240 {
+		return p
+	}
+	return `\\?\` + abs
 }

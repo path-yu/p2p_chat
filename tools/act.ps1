@@ -23,10 +23,10 @@ if ($ProcessId -gt 0) {
 if (-not $p) { Write-Output "NO WINDOW"; exit 1 }
 $hwnd = $p.MainWindowHandle
 # A window raised over all others takes the foreground, then goes back.
+# Stay on top while the click lands: the framework reads the real cursor
+# position, so a window that drops behind another one gets nothing.
 [void][W]::SetWindowPos($hwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0013)
 [void][W]::SetForegroundWindow($hwnd)
-Start-Sleep -Milliseconds 250
-[void][W]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013)
 Start-Sleep -Milliseconds 250
 $r = New-Object W+RECT
 [void][W]::GetWindowRect($hwnd, [ref]$r)
@@ -39,6 +39,7 @@ if ($rx -ge 0) {
   [W]::mouse_event(0x0002, 0, 0, 0, 0)
   Start-Sleep -Milliseconds 60
   [W]::mouse_event(0x0004, 0, 0, 0, 0)
+  [void][W]::SetWindowPos($hwnd, [IntPtr](-2), 0, 0, 0, 0, 0x0013)
   Write-Output "clicked $x,$y"
   Start-Sleep -Milliseconds 400
 }

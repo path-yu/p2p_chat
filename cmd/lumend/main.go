@@ -176,7 +176,7 @@ func main() {
 		case p2p.PeerJoined:
 			say("＋ %s 连上了（%s）", ev.Peer.Name, ev.Peer.Addr)
 			if *send != "" {
-				if st, err := node.OfferFile(*send); err != nil {
+				if st, err := node.OfferFile("lobby", *send); err != nil {
 					say("发送 %s 失败: %v", *send, err)
 				} else {
 					say("请求发送 %s（%s）", st.Name, humanSize(st.Size))

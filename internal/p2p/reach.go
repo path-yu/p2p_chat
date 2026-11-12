@@ -294,13 +294,21 @@ func (n *Node) Reach(cfg ReachConfig) {
 			n.reach.Lock()
 			self := n.reach.r.Public
 			n.reach.Unlock()
+			var fresh []string
 			for _, addr := range found {
 				if addr == self || addr == n.Addr {
 					continue
 				}
-				n.Punch(addr)
+				fresh = append(fresh, addr)
 			}
+			n.PunchAll(fresh, 3)
 		}
+		// A punch that times out can ask for the peer's new endpoint at
+		// once, instead of waiting for the next tick.
+		n.mu.Lock()
+		n.reLookup = lookup
+		n.mu.Unlock()
+
 		lookup()
 		t := time.NewTicker(cfg.Lookup)
 		defer t.Stop()
