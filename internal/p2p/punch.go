@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -112,9 +113,31 @@ func (n *Node) Punch(addr string) {
 			time.Sleep(30 * time.Millisecond)
 		}
 		deadline := time.Now().Add(12 * time.Second)
+		// A NAT that rewrites the source port usually allocates it in
+		// order, so the door the lookup announced can be one or two away
+		// from the real one. After a few seconds of silence, the same host
+		// is asked on its neighbours too — never anyone else, and only a
+		// handful of ports.
+		var near []*net.UDPAddr
+		nextPredict := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) && !pipe.seen.Load() {
 			hub.punch(ua)
+			if time.Now().After(nextPredict) {
+				if near == nil {
+					near = nearbyPorts(ua, 5)
+					if len(near) > 0 {
+						n.logf("打洞无回应，改试邻近端口 %s", portsOf(near))
+					}
+				}
+				for _, alt := range near {
+					hub.punch(alt)
+				}
+				nextPredict = time.Now().Add(400 * time.Millisecond)
+			}
 			time.Sleep(200 * time.Millisecond)
+		}
+		if pipe.seen.Load() && len(near) > 0 {
+			n.logf("打洞打通用上了邻近端口（%s 无回应）", addr)
 		}
 		if !pipe.seen.Load() {
 			n.logf("打洞超时: %s", addr)
@@ -135,6 +158,34 @@ func (n *Node) Punch(addr string) {
 		peer.Outbound = true
 		n.addPeer(peer)
 	}()
+}
+
+// nearbyPorts lists the ports to try when the announced one stays silent:
+// a few above it, a couple below, since allocation mostly runs upward.
+// The host is never changed, so this only ever talks to the peer.
+func nearbyPorts(addr *net.UDPAddr, n int) []*net.UDPAddr {
+	offsets := []int{1, 2, 3, -1, 4, 5, -2}
+	out := make([]*net.UDPAddr, 0, n)
+	for _, off := range offsets {
+		if len(out) >= n {
+			break
+		}
+		port := addr.Port + off
+		if port < 1 || port > 65535 {
+			continue
+		}
+		out = append(out, &net.UDPAddr{IP: addr.IP, Port: port})
+	}
+	return out
+}
+
+// portsOf writes a list of addresses short, for a log line.
+func portsOf(addrs []*net.UDPAddr) string {
+	parts := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		parts = append(parts, strconv.Itoa(a.Port))
+	}
+	return strings.Join(parts, ",")
 }
 
 // PunchAll tries several addresses at once: a lookup often knows more than
